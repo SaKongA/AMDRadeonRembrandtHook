@@ -1,5 +1,6 @@
 #include "Kernel/GpuInterruptStartup.hpp"
 #include "Diagnostics/KernelLog.hpp"
+#include "Hardware/Rembrandt/PciIdentity.hpp"
 #include <IOKit/IOService.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #include <libkern/c++/OSData.h>
@@ -18,6 +19,7 @@ uint32_t getRegistryUint32(IORegistryEntry *entry, const char *key) {
 bool handleGpuPublished(void *, void *, IOService *service, IONotifier *) {
     if (getRegistryUint32(service, "vendor-id") != 0x1002 || (getRegistryUint32(service, "class-code") >> 16) != 0x03)
         return true;
+    publishRembrandtIdentity(service, getRegistryUint32(service, "device-id"));
     auto device = static_cast<IOPCIDevice *>(service);
     IOPCIAddressSpace address {};
     address.bits = getRegistryUint32(service, "reg") & 0x00ffff00;

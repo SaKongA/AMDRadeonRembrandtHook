@@ -1,4 +1,5 @@
 #include "Kexts/IOPCIFamily/PciConfigHooks.hpp"
+#include "Hardware/Rembrandt/PciIdentity.hpp"
 #include "Diagnostics/KernelLog.hpp"
 #include <IOKit/pci/IOPCIDevice.h>
 
@@ -27,14 +28,14 @@ uint8_t wrapReadConfig8(void *device, uint64_t offset) {
 uint16_t wrapReadConfig16(void *device, uint64_t offset) {
     auto read16 = reinterpret_cast<Read16Function>(originalRead16);
     uint16_t value = read16(device, offset);
-    if (offset == kIOPCIConfigDeviceID && value == 0x1681 && read16(device, kIOPCIConfigVendorID) == 0x1002)
+    if (offset == kIOPCIConfigDeviceID && isRembrandtDeviceId(value) && read16(device, kIOPCIConfigVendorID) == 0x1002)
         value = 0x73ff;
     return static_cast<uint16_t>(adjustPciRevision(device, offset, value));
 }
 
 uint32_t wrapReadConfig32(void *device, uint64_t offset) {
     uint32_t value = reinterpret_cast<Read32Function>(originalRead32)(device, offset);
-    if (offset == kIOPCIConfigVendorID && value == 0x16811002) value = 0x73ff1002;
+    if (offset == kIOPCIConfigVendorID && (value & 0xffffu) == 0x1002 && isRembrandtDeviceId(value >> 16)) value = 0x73ff1002;
     return adjustPciRevision(device, offset, value);
 }
 
