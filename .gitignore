@@ -1,0 +1,15 @@
+# Local build output and downloaded dependencies
+/build/
+/upstream/
+
+# macOS metadata
+.DS_Store
+._*
+
+# Reverse-engineering databases
+*.i64
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
