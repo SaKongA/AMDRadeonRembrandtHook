@@ -147,6 +147,7 @@ bool isRembrandtHookEnabled() {
 }
 
 void startRembrandtHook() {
+    KernelLog::startDiskLogging();
     if (!isRembrandtHookEnabled()) {
         KernelLog::logInfo(KernelLog::Category::Core, "Core", "start", "Startup not authorized by NVRAM flags");
         return;

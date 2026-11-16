@@ -17,6 +17,7 @@ public:
     static void logDiagnosticWarning(Category category, const char *component, const char *operation, const char *format, ...)
         __attribute__((format(printf, 4, 5)));
     static bool startNvramLogging();
+    static void startDiskLogging();
 
 private:
     static void writeLog(bool persist, Category category, const char *level, const char *component, const char *operation,
