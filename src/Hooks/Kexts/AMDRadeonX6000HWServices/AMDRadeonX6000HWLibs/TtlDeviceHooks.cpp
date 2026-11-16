@@ -6,6 +6,15 @@ namespace {
 using HookFunction = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 mach_vm_address_t originalSetDeviceCapability;
 mach_vm_address_t originalGetUmaPhysicalFramebufferOffset;
+mach_vm_address_t originalInitializeTtl;
+
+uint32_t wrapInitializeTtl(void *services, const uint64_t *input) {
+    bool hasCallbacks = input && input[2];
+    auto result = reinterpret_cast<uint32_t (*)(void *, const uint64_t *)>(originalInitializeTtl)(services, input);
+    KernelLog::logInfo(KernelLog::Category::Hook, "TTL", "initialize", "Callbacks present=%u result=0x%08x",
+                       static_cast<unsigned int>(hasCallbacks), result);
+    return result;
+}
 
 uint64_t wrapSetDeviceCapability(uint64_t context, uint64_t device, uint64_t revision,
                                  uint64_t externalRevision, uint64_t e, uint64_t f) {
@@ -23,6 +32,7 @@ void installTtlDeviceHooks(KernelPatcher &patcher, size_t index, mach_vm_address
     KernelPatcher::RouteRequest requests[] {
         {"_ttlSetDeviceCapabilityEntry", wrapSetDeviceCapability, originalSetDeviceCapability},
         {"_vm_10_1_get_uma_physical_fb_offset", wrapGetUmaPhysicalFramebufferOffset, originalGetUmaPhysicalFramebufferOffset},
+        {"__ZN14AmdTtlServices10initializeEP30_TtlLibraryInitializationInput", wrapInitializeTtl, originalInitializeTtl},
     };
     for (auto &request : requests) {
         if (patcher.routeMultiple(index, &request, 1, address, size))
