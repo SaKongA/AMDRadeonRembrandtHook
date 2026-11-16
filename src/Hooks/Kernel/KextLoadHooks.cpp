@@ -1,6 +1,7 @@
 #include "Kernel/KextLoadHooks.hpp"
 #include "Diagnostics/KernelLog.hpp"
 #include "Kernel/SystemPowerHooks.hpp"
+#include "Kernel/DriverMatchingHooks.hpp"
 #include "Bundles/AMDRadeonX6000MTLDriver/MetalSwizzleHooks.hpp"
 #include "Kexts/AMDRadeonX6000/AcceleratorHooks.hpp"
 #include "Kexts/AMDRadeonX6000Framebuffer/FramebufferHooks.hpp"
@@ -101,6 +102,7 @@ OSReturn wrapKextStart(void *kext, bool startDependencies) {
 }
 
 void installKextStartHook(void *, KernelPatcher &patcher) {
+    installDriverMatchingHooks(patcher);
     kernelPatcher = &patcher;
     loadedKmods = reinterpret_cast<kmod_info_t **>(patcher.solveSymbol(KernelPatcher::KernelID, "_kmod"));
     if (!loadedKmods) KernelLog::logError(KernelLog::Category::Hook, "KextLoad", "resolve", "_kmod unavailable: error=%d", static_cast<int>(patcher.getError()));
