@@ -18,7 +18,6 @@ uint32_t getRegistryUint32(IORegistryEntry *entry, const char *key) {
 bool handleGpuPublished(void *, void *, IOService *service, IONotifier *) {
     if (getRegistryUint32(service, "vendor-id") != 0x1002 || (getRegistryUint32(service, "class-code") >> 16) != 0x03)
         return true;
-    // The notification matches IOPCIDevice; avoid importing its metaClass from IOPCIFamily.
     auto device = static_cast<IOPCIDevice *>(service);
     IOPCIAddressSpace address {};
     address.bits = getRegistryUint32(service, "reg") & 0x00ffff00;

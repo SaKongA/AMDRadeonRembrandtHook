@@ -42,7 +42,6 @@ void probeUsb4Router(void *, wait_result_t) {
 
 bool handleUsb4DevicePublished(void *, void *, IOService *service, IONotifier *) {
     if (getRegistryUint32(service, "vendor-id") != 0x1022 || getRegistryUint32(service, "class-code") != 0x0c0340) return true;
-    // The notification matches IOPCIDevice; avoid importing its metaClass from IOPCIFamily.
     auto device = static_cast<IOPCIDevice *>(service);
     IOPCIAddressSpace address {};
     address.bits = getRegistryUint32(service, "reg") & 0x00ffff00;

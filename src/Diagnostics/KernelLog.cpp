@@ -1,5 +1,8 @@
 #include "Diagnostics/KernelLog.hpp"
 #include <IOKit/IOLib.h>
+#include <IOKit/IODeviceTreeSupport.h>
+#include <IOKit/IOKitKeys.h>
+#include <libkern/c++/OSString.h>
 #include <libkern/libkern.h>
 #include <Headers/kern_nvram.hpp>
 #include <kern/thread.h>
@@ -11,6 +14,16 @@ constexpr size_t lastLogCapacity = 512;
 IOSimpleLock *lastLogLock;
 char lastLog[lastLogCapacity];
 uint64_t lastLogSequence;
+
+bool requestNvramSync() {
+    auto options = IORegistryEntry::fromPath("/options", gIODTPlane);
+    if (!options) return false;
+    auto value = OSString::withCString("now");
+    bool accepted = value && options->setProperty(kIONVRAMSyncNowPropertyKey, value);
+    if (value) value->release();
+    options->release();
+    return accepted;
+}
 
 const char *getCategoryName(KernelLog::Category category) {
     switch (category) {
@@ -51,7 +64,7 @@ void saveLastLog(void *, wait_result_t) {
                 reportedFailure = true;
             }
         }
-        if (pendingSync && storage.sync()) pendingSync = false;
+        if (pendingSync && requestNvramSync()) pendingSync = false;
         storage.deinit();
     }
 }
