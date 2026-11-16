@@ -29,6 +29,8 @@
 
 记得留一份能正常启动的 EFI 备用。机器还需要通过 ACPI `VFCT` 表提供本机 VBIOS。
 
+kext 会尝试读取集显的预留显存和 VBIOS 中的内存位宽，给支持的 ATOM 格式补上缺失的 PSP 和 VRAM 表。如果读不到，可以在 OpenCore 的显卡 DeviceProperties 中添加 `rmb-vram-size-mb` 和 `rmb-memory-width`，类型为 4 字节小端序 `Data`。例如 512 MiB 和 128 位分别填 `00020000` 和 `80000000`；参数不全时不会补 VRAM 表。
+
 ## 如何自行构建？
 
 ```sh
@@ -43,5 +45,6 @@
 
 - [Acidanthera](https://github.com/acidanthera)：Lilu、OpenCore 和 MacKernelSDK。
 - [RembrandtGfx](https://github.com/caoshiyuan0211-blip/winmax2-2022-6800u-hackintosh) 和 [Radeonized](https://github.com/FranciumOS-org/Radeonized)：Rembrandt 相关研究。
+- [660m-Metal](https://github.com/rthh21/660m-Metal)：ATOM VBIOS 补表研究。
 - [NootedRed](https://github.com/ChefKissInc/NootedRed)：AMD 核显相关研究。
 - [cctools-port](https://github.com/tpoechtrager/cctools-port) 及 Linux AMDGPU 贡献者。
