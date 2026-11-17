@@ -12,9 +12,14 @@
 
 ## 我能使用吗？
 
-面向 PCI ID 为 `1002:1681` 或 `1002:164d` 的 **AMD Radeon 680M 和 660M** 核显。
+面向搭载以下 AMD Ryzen 处理器、且核显 PCI ID 为 `1002:1681` 或 `1002:164d` 的 Rembrandt 设备：
 
-目前还在**实验阶段**，图形加速尚未确认可用，可能会遇到内核崩溃或显示异常。插件允许在 macOS Big Sur 至 Tahoe 加载，但这些系统版本还没有全部验证。
+- Ryzen 7：`6800H`、`6800HS`、`6800U`、`7735HS`、`7735U`
+- Ryzen 9：`6900HS`、`6900HX`、`6980HS`、`6980HX`
+- Ryzen 5：`6600H`、`6600HS`、`6600U`、`7535HS`、`7535U`
+- Ryzen 3：`7335U`
+
+以上 CPU 型号用于识别显卡显示名称，不代表每种机型都已经测试。其他 PCI ID 匹配的 Rembrandt CPU 会使用通用名称 `AMD Radeon Graphics (Rembrandt)`。Ryzen 7 6800HS 机器已观察到 Metal 加速；项目仍处于实验阶段，其他 CPU 和 macOS 版本需要验证。插件允许在 macOS Big Sur 至 Tahoe 加载，但不代表这些版本都已验证。
 
 ## 如何使用？
 

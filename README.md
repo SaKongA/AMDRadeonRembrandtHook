@@ -12,7 +12,14 @@ It patches Apple's `AMDRadeonX6000` driver stack for Rembrandt, including PCI ma
 
 ## Can I use it?
 
-This project targets **AMD Radeon 680M and 660M** Rembrandt iGPUs with PCI IDs `1002:1681` or `1002:164d`. It is **experimental**: working acceleration is not yet confirmed. The plugin declares macOS Big Sur through Tahoe; that is not a compatibility guarantee. Kernel panics and display failures are possible.
+This project targets Rembrandt integrated graphics with PCI IDs `1002:1681` or `1002:164d` in these AMD Ryzen processors:
+
+- Ryzen 7: `6800H`, `6800HS`, `6800U`, `7735HS`, `7735U`
+- Ryzen 9: `6900HS`, `6900HX`, `6980HS`, `6980HX`
+- Ryzen 5: `6600H`, `6600HS`, `6600U`, `7535HS`, `7535U`
+- Ryzen 3: `7335U`
+
+These CPU models are recognized for GPU name display; the list is not a claim that each machine has been tested. Other Rembrandt CPUs with a matching PCI ID use the generic name `AMD Radeon Graphics (Rembrandt)`. Metal acceleration has been observed on a Ryzen 7 6800HS system; the project remains experimental, and other CPUs and macOS versions need verification. The plugin declares macOS Big Sur through Tahoe, which is not a compatibility guarantee.
 
 ## How do I use it?
 
