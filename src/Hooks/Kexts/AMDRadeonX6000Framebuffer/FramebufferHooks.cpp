@@ -13,6 +13,16 @@ mach_vm_address_t originalPopulateDeviceInfo;
 mach_vm_address_t originalPopulateXgmiConfig;
 mach_vm_address_t originalMessageAccelerator;
 mach_vm_address_t originalDoesAcceleratorExist;
+mach_vm_address_t originalCreateControllerCoreServices;
+
+uint64_t wrapCreateControllerCoreServices(uint64_t controller, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f) {
+    KernelLog::logDiagnosticInfo(KernelLog::Category::Hook, "Framebuffer", "create core services", "Enter: controller=%u",
+                                 static_cast<unsigned int>(controller != 0));
+    auto result = reinterpret_cast<HookFunction>(originalCreateControllerCoreServices)(controller, b, c, d, e, f);
+    KernelLog::logDiagnosticInfo(KernelLog::Category::Hook, "Framebuffer", "create core services", "Return: result=0x%llx",
+                                 static_cast<unsigned long long>(result));
+    return result;
+}
 
 uint64_t wrapPopulateDeviceInfo(uint64_t object, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f) {
     auto result = reinterpret_cast<HookFunction>(originalPopulateDeviceInfo)(object, b, c, d, e, f);
@@ -94,6 +104,15 @@ void installFramebufferIdentityHooks(KernelPatcher &patcher, size_t index, mach_
         else KernelLog::logError(KernelLog::Category::Hook, "Framebuffer", "install identity", "Hook failed: %s error=%d", request.symbol, static_cast<int>(patcher.getError()));
         patcher.clearError();
     }
+    KernelPatcher::RouteRequest coreServicesRequest {
+        "__ZN40AMDRadeonX6000_AmdRadeonControllerNavi2328createControllerCoreServicesEv",
+        wrapCreateControllerCoreServices, originalCreateControllerCoreServices
+    };
+    if (patcher.routeMultiple(index, &coreServicesRequest, 1, address, size))
+        KernelLog::logDiagnosticInfo(KernelLog::Category::Hook, "Framebuffer", "install core services", "Hook installed");
+    else
+        KernelLog::logDiagnosticWarning(KernelLog::Category::Hook, "Framebuffer", "install core services", "Hook failed: error=%d", static_cast<int>(patcher.getError()));
+    patcher.clearError();
     originalDoesAcceleratorExist = patcher.solveSymbol(index,
         "__ZNK34AMDRadeonX6000_AmdRadeonController20doesAcceleratorExistEv", address, size);
     if (!originalDoesAcceleratorExist) KernelLog::logWarning(KernelLog::Category::Hook, "Framebuffer", "resolve", "Accelerator existence function unavailable: error=%d", static_cast<int>(patcher.getError()));
