@@ -36,6 +36,7 @@ kmod_info_t **loadedKmods;
 mach_vm_address_t originalKextStart;
 bool installed[arrsize(kexts)];
 bool agdcFound, xhciFound;
+bool pciInstallAttempted;
 
 void installFramebufferHooks(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
     patchFramebufferCapabilities(address, size);
@@ -55,6 +56,18 @@ void installFramebufferHooks(KernelPatcher &patcher, size_t index, mach_vm_addre
 
 void scanLoadedKexts() {
     if (!kernelPatcher || !loadedKmods) return;
+    if (!__atomic_load_n(&pciInstallAttempted, __ATOMIC_ACQUIRE) &&
+        kexts[pciIndex].loadIndex != KernelPatcher::KextInfo::Unloaded) {
+        for (auto module = *loadedKmods; module; module = module->next) {
+            if (strncmp(module->name, kexts[pciIndex].id, KMOD_MAX_NAME)) continue;
+            bool expected = false;
+            if (!__atomic_compare_exchange_n(&pciInstallAttempted, &expected, true, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) break;
+            KernelLog::logInfo(KernelLog::Category::Hook, "KextLoad", "install", "Installing PCI hooks before graphics initialization");
+            auto size = kernelPatcher->updateRunningInfo(kexts[pciIndex].loadIndex, module->address, module->size);
+            installed[pciIndex] = installPciConfigHooks(*kernelPatcher, kexts[pciIndex].loadIndex, module->address, size);
+            break;
+        }
+    }
     for (auto module = *loadedKmods; module; module = module->next) {
         if (!agdcFound && !strncmp(module->name, "com.apple.AppleGraphicsDeviceControl", KMOD_MAX_NAME)) {
             agdcFound = true;
@@ -71,6 +84,8 @@ void scanLoadedKexts() {
                 kexts[index].loadIndex == KernelPatcher::KextInfo::Unloaded) continue;
             installed[index] = true;
             KernelLog::logInfo(KernelLog::Category::Hook, "KextLoad", "install", "Installing hooks for %s", module->name);
+            if (!arePciConfigHooksInstalled())
+                KernelLog::logError(KernelLog::Category::Hook, "KextLoad", "install", "PCI identity hooks unavailable before %s", module->name);
             auto size = kernelPatcher->updateRunningInfo(kexts[index].loadIndex, module->address, module->size);
             if (index == hwLibsIndex)
                 installHwLibsHooks(*kernelPatcher, kexts[index].loadIndex, module->address, size);
@@ -86,13 +101,6 @@ void scanLoadedKexts() {
             auto size = kernelPatcher->updateRunningInfo(kexts[backlightIndex].loadIndex, module->address, module->size);
             installAppleBacklightPanelHook(*kernelPatcher, kexts[backlightIndex].loadIndex, module->address, size);
         }
-        if (!installed[pciIndex] && !strncmp(module->name, kexts[pciIndex].id, KMOD_MAX_NAME) &&
-            kexts[pciIndex].loadIndex != KernelPatcher::KextInfo::Unloaded) {
-            installed[pciIndex] = true;
-            KernelLog::logInfo(KernelLog::Category::Hook, "KextLoad", "install", "Installing hooks for %s", module->name);
-            auto size = kernelPatcher->updateRunningInfo(kexts[pciIndex].loadIndex, module->address, module->size);
-            installPciConfigHooks(*kernelPatcher, kexts[pciIndex].loadIndex, module->address, size);
-        }
     }
 }
 
@@ -102,11 +110,18 @@ OSReturn wrapKextStart(void *kext, bool startDependencies) {
 }
 
 void installKextStartHook(void *, KernelPatcher &patcher) {
-    installDriverMatchingHooks(patcher);
     kernelPatcher = &patcher;
     loadedKmods = reinterpret_cast<kmod_info_t **>(patcher.solveSymbol(KernelPatcher::KernelID, "_kmod"));
     if (!loadedKmods) KernelLog::logError(KernelLog::Category::Hook, "KextLoad", "resolve", "_kmod unavailable: error=%d", static_cast<int>(patcher.getError()));
     patcher.clearError();
+    patcher.loadKinfo(&kexts[pciIndex]);
+    if (kexts[pciIndex].loadIndex == KernelPatcher::KextInfo::Unloaded)
+        KernelLog::logError(KernelLog::Category::Hook, "KextLoad", "prepare PCI", "IOPCIFamily symbols unavailable: error=%d", static_cast<int>(patcher.getError()));
+    patcher.clearError();
+    scanLoadedKexts();
+    if (!arePciConfigHooksInstalled())
+        KernelLog::logWarning(KernelLog::Category::Hook, "KextLoad", "prepare PCI", "PCI hooks not yet installed; retrying on kext start");
+    installDriverMatchingHooks(patcher);
     KernelPatcher::RouteRequest request {"__ZN6OSKext5startEb", wrapKextStart, originalKextStart};
     if (patcher.routeMultiple(KernelPatcher::KernelID, &request, 1))
         KernelLog::logInfo(KernelLog::Category::Hook, "KextLoad", "install", "OSKext start hook installed");

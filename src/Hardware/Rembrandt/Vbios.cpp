@@ -1,256 +1,260 @@
-#include <stddef.h>
-#include <stdint.h>
-#ifndef REMBRANDT_VBIOS_HOST_TEST
 #include "Hardware/Rembrandt/Vbios.hpp"
-#include "Hardware/Rembrandt/PciIdentity.hpp"
 #include "Diagnostics/KernelLog.hpp"
-#include <IOKit/IOService.h>
+#include <IOKit/IOLib.h>
+#include <IOKit/IODeviceMemory.h>
+#include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/acpi/IOACPIPlatformExpert.h>
 #include <IOKit/pci/IOPCIDevice.h>
-#include <IOKit/IOMemoryDescriptor.h>
 #include <libkern/c++/OSData.h>
-#include <libkern/c++/OSNumber.h>
-#else
-#include <cstring>
-#endif
+#include <libkern/libkern.h>
 
 namespace {
 
-uint16_t read16(const uint8_t *p) {
-    return static_cast<uint16_t>(p[0]) | static_cast<uint16_t>(p[1]) << 8;
+uint16_t readUint16(const uint8_t *bytes) {
+    return static_cast<uint16_t>(static_cast<uint16_t>(bytes[0]) | static_cast<uint16_t>(bytes[1]) << 8);
 }
 
-uint32_t read32(const uint8_t *p) {
-    return static_cast<uint32_t>(p[0]) | static_cast<uint32_t>(p[1]) << 8 |
-        static_cast<uint32_t>(p[2]) << 16 | static_cast<uint32_t>(p[3]) << 24;
+uint32_t readUint32(const uint8_t *bytes) {
+    return static_cast<uint32_t>(readUint16(bytes)) | static_cast<uint32_t>(readUint16(bytes + 2)) << 16;
 }
-
-void write16(uint8_t *p, uint16_t value) {
-    p[0] = value;
-    p[1] = value >> 8;
-}
-
-void write32(uint8_t *p, uint32_t value) {
-    write16(p, value);
-    write16(p + 2, value >> 16);
-}
-
-struct AtomLayout {
-    uint32_t pci;
-    uint32_t tables;
-    uint32_t tableSize;
-};
-
-bool parseAtomLayout(const uint8_t *rom, uint32_t size, uint32_t deviceId, AtomLayout &layout) {
-    if (!rom || size < 0x4a || size > 0x10000 || size % 512 || rom[0] != 0x55 || rom[1] != 0xaa ||
-        static_cast<uint32_t>(rom[2]) * 512 != size) return false;
-    uint32_t pci = read16(rom + 0x18);
-    uint32_t header = read16(rom + 0x48);
-    if (pci > size - 0x18 || header > size - 0x22 || memcmp(rom + pci, "PCIR", 4) ||
-        read16(rom + pci + 4) != 0x1002 || read16(rom + pci + 6) != deviceId ||
-        read16(rom + pci + 0x10) * 512U != size || !(rom[pci + 0x15] & 0x80) ||
-        memcmp(rom + header + 4, "ATOM", 4) || read16(rom + header) < 0x22 ||
-        read16(rom + header) > size - header || rom[header + 2] != 2 ||
-        (rom[header + 3] != 2 && rom[header + 3] != 3)) return false;
-    uint32_t tables = read16(rom + header + 0x20);
-    if (tables > size - 0x3e) return false;
-    uint32_t tableSize = read16(rom + tables);
-    if (tableSize < 0x3e || tableSize > size - tables || rom[tables + 2] != 2 || rom[tables + 3] != 1) return false;
-    uint8_t checksum = 0;
-    for (uint32_t i = 0; i < size; ++i) checksum += rom[i];
-    if (checksum) return false;
-    const uint32_t slots[] {0x16, 0x3c};
-    for (uint32_t slot : slots) {
-        uint32_t offset = read16(rom + tables + slot);
-        if (offset && (offset > size - 4 || read16(rom + offset) < 4 || read16(rom + offset) > size - offset)) return false;
-    }
-    layout = {pci, tables, tableSize};
-    return true;
-}
-
-uint32_t readUmaWidth(const uint8_t *rom, uint32_t size, const AtomLayout &layout) {
-    if (layout.tableSize < 0x42) return 0;
-    uint32_t offset = read16(rom + layout.tables + 0x40);
-    if (!offset || offset > size - 28 || read16(rom + offset) < 28 || read16(rom + offset) > size - offset ||
-        rom[offset + 2] != 2 || (rom[offset + 3] != 1 && rom[offset + 3] != 2)) return 0;
-    uint8_t type = rom[offset + 26];
-    uint8_t channels = rom[offset + 27];
-    if (!channels || channels > 8 || (type != 26 && type != 30 && type != 34 && type != 35)) return 0;
-    return channels * (type == 35 ? 32U : 64U);
-}
-
-struct AugmentResult {
-    uint32_t size;
-    bool pspAdded;
-    bool vramAdded;
-    bool vramMissing;
-};
-
-AugmentResult augmentVbios(const uint8_t *source, uint32_t size, uint32_t deviceId, uint32_t vramMiB,
-                           uint32_t width, uint8_t *output, uint32_t capacity) {
-    AtomLayout layout {};
-    if (!output || !parseAtomLayout(source, size, deviceId, layout)) return {};
-    bool addPsp = read16(source + layout.tables + 0x16) == 0;
-    bool missingVram = read16(source + layout.tables + 0x3c) == 0;
-    bool validParams = vramMiB >= 16 && vramMiB <= 65536 && width >= 16 && width <= 256 && width % 16 == 0;
-    bool addVram = missingVram && validParams;
-    uint32_t end = size;
-    uint32_t psp = 0, vram = 0;
-    if (addPsp) {
-        psp = (end + 15) & ~15U;
-        end = psp + 0x414;
-    }
-    if (addVram) {
-        vram = (end + 15) & ~15U;
-        end = vram + 0x358;
-    }
-    if (end > 0x10000 || psp > 0xffff || vram > 0xffff) return {};
-    uint32_t outputSize = (end + 511) & ~511U;
-    if (outputSize > 0x10000 || outputSize > capacity) return {};
-    for (uint32_t i = 0; i < outputSize; ++i) output[i] = i < size ? source[i] : 0;
-    write16(output + layout.pci + 6, 0x73ff);
-    if (addPsp) {
-        write16(output + layout.tables + 0x16, psp);
-        write16(output + psp, 0x414);
-        output[psp + 2] = 2;
-        output[psp + 3] = 1;
-        output[psp + 4] = '$'; output[psp + 5] = 'P'; output[psp + 6] = 'S'; output[psp + 7] = 'P';
-    }
-    if (addVram) {
-        write16(output + layout.tables + 0x3c, vram);
-        write16(output + vram, 0x358);
-        output[vram + 2] = 2;
-        output[vram + 3] = 6;
-        output[vram + 20] = 1;
-        uint8_t *module = output + vram + 24;
-        uint32_t channels = width / 16;
-        write32(module, vramMiB);
-        write32(module + 4, (1U << channels) - 1);
-        write16(module + 20, 0x34);
-        module[23] = 0x70;
-        module[24] = channels;
-        module[25] = 4;
-        const char name[] = "RMB-UMA";
-        for (size_t i = 0; i < sizeof(name); ++i) module[32 + i] = name[i];
-    }
-    output[2] = outputSize / 512;
-    write16(output + layout.pci + 0x10, outputSize / 512);
-    output[0x21] = 0;
-    uint8_t checksum = 0;
-    for (uint32_t i = 0; i < outputSize; ++i) checksum += output[i];
-    output[0x21] = -checksum;
-    return {outputSize, addPsp, addVram, missingVram && !addVram};
-}
-
-#ifndef REMBRANDT_VBIOS_HOST_TEST
 
 class AcpiPlatformAccess : public IOACPIPlatformExpert {
 public:
     const OSData *getVfct() { return getACPITableData("VFCT", 0); }
 };
 
-uint32_t registryUint32(IORegistryEntry *device, const char *name) {
-    auto object = device->getProperty(name);
-    if (auto number = OSDynamicCast(OSNumber, object)) return number->unsigned32BitValue();
-    auto data = OSDynamicCast(OSData, object);
-    if (!data || data->getLength() != 4) return 0;
-    return read32(static_cast<const uint8_t *>(data->getBytesNoCopy()));
+OSData *copyVfctVbios(IOPCIDevice *device) {
+    auto platform = IOService::getPlatform();
+    if (!platform || !platform->metaCast("IOACPIPlatformExpert")) {
+        KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "read VFCT", "ACPI platform expert unavailable");
+        return nullptr;
+    }
+    auto table = static_cast<AcpiPlatformAccess *>(platform)->getVfct();
+    if (!table) {
+        KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "read VFCT", "ACPI VFCT table unavailable");
+        return nullptr;
+    }
+    auto bytes = static_cast<const uint8_t *>(table->getBytesNoCopy());
+    uint32_t size = table->getLength();
+    if (!bytes || size < 0x4c || size > 512 * 1024 || memcmp(bytes, "VFCT", 4)) {
+        KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "read VFCT", "Invalid VFCT header or buffer length=%u", size);
+        return nullptr;
+    }
+    uint32_t length = readUint32(bytes + 4);
+    uint32_t offset = readUint32(bytes + 0x34);
+    if (length < 0x4c || length > size || offset < 0x4c || offset >= length) {
+        KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "read VFCT", "Invalid VFCT length=%u image offset=0x%x", length, offset);
+        return nullptr;
+    }
+    uint8_t checksum = 0;
+    for (uint32_t i = 0; i < length; ++i) checksum += bytes[i];
+    if (checksum) {
+        KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "read VFCT", "Invalid ACPI checksum=0x%02x", static_cast<unsigned int>(checksum));
+        return nullptr;
+    }
+    auto reg = OSDynamicCast(OSData, device->getProperty("reg"));
+    auto deviceId = OSDynamicCast(OSData, device->getProperty("device-id"));
+    if (!reg || reg->getLength() < 4 || !deviceId || deviceId->getLength() < 4) {
+        KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "read VFCT", "GPU PCI address or device identity unavailable");
+        return nullptr;
+    }
+    uint32_t address = readUint32(static_cast<const uint8_t *>(reg->getBytesNoCopy()));
+    uint32_t id = readUint32(static_cast<const uint8_t *>(deviceId->getBytesNoCopy())) & 0xffff;
+    uint32_t bus = (address >> 16) & 0xff;
+    uint32_t slot = (address >> 11) & 0x1f;
+    uint32_t function = (address >> 8) & 7;
+    while (offset < length) {
+        if (length - offset < 28) {
+            KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "read VFCT", "Truncated VFCT image header at 0x%x", offset);
+            return nullptr;
+        }
+        uint32_t imageSize = readUint32(bytes + offset + 24);
+        uint32_t imageOffset = offset + 28;
+        if (!imageSize || imageSize > length - imageOffset) {
+            KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "read VFCT", "Invalid VFCT image size=%u at 0x%x", imageSize, offset);
+            return nullptr;
+        }
+        if (readUint32(bytes + offset) == bus && readUint32(bytes + offset + 4) == slot &&
+            readUint32(bytes + offset + 8) == function && readUint16(bytes + offset + 12) == 0x1002 &&
+            readUint16(bytes + offset + 14) == id) {
+            auto image = OSData::withBytes(bytes + imageOffset, imageSize);
+            if (!image) KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "read VFCT", "Unable to copy %u-byte VBIOS", imageSize);
+            else KernelLog::logInfo(KernelLog::Category::Hardware, "VBIOS", "read VFCT", "Found GPU %02x:%02x.%u device=%04x image size=%u", bus, slot, function, id, imageSize);
+            return image;
+        }
+        offset = imageOffset + imageSize;
+    }
+    KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "read VFCT", "No VBIOS for GPU %02x:%02x.%u device=%04x", bus, slot, function, id);
+    return nullptr;
 }
 
-uint32_t readUmaSize(IOPCIDevice *device) {
-    constexpr uint32_t offset = 0xde3 * 4;
-    if (!device || !(device->configRead16(kIOPCIConfigCommand) & kIOPCICommandMemorySpace)) return 0;
+void writeUint16(uint8_t *bytes, uint16_t value) {
+    bytes[0] = static_cast<uint8_t>(value);
+    bytes[1] = static_cast<uint8_t>(value >> 8);
+}
+
+void writeUint32(uint8_t *bytes, uint32_t value) {
+    writeUint16(bytes, static_cast<uint16_t>(value));
+    writeUint16(bytes + 2, static_cast<uint16_t>(value >> 16));
+}
+
+uint32_t readVramSize(IOPCIDevice *device) {
+    constexpr uint32_t offset = 0xde3 * sizeof(uint32_t);
     auto memory = device->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress5);
     if (!memory || memory->getLength() < offset + sizeof(uint32_t)) return 0;
     auto map = memory->map(kIOMapInhibitCache);
     if (!map) return 0;
     auto base = reinterpret_cast<volatile uint32_t *>(map->getVirtualAddress());
-    uint32_t size = base ? base[offset / 4] : 0;
+    uint32_t size = base ? base[offset / sizeof(uint32_t)] : 0;
     map->release();
     return size >= 16 && size <= 65536 ? size : 0;
 }
 
-bool validAtomRom(const uint8_t *rom, uint32_t size) {
-    if (size < 0x4a || rom[0] != 0x55 || rom[1] != 0xaa) return false;
-    uint32_t offset = read16(rom + 0x48);
-    return offset && offset <= size && size - offset >= 8 &&
-        (!memcmp(rom + offset + 4, "ATOM", 4) || !memcmp(rom + offset + 4, "MOTA", 4));
+uint32_t readMemoryWidth(const uint8_t *image, uint32_t size, uint32_t master, uint32_t masterSize) {
+    if (masterSize < 0x42) return 0;
+    uint32_t table = readUint16(image + master + 0x40);
+    if (!table || table > size - 28 || readUint16(image + table) < 28 ||
+        readUint16(image + table) > size - table || image[table + 2] != 2 || image[table + 3] != 2) return 0;
+    uint32_t type = image[table + 26];
+    uint32_t channels = image[table + 27];
+    if (type != 34 || !channels || channels > 4) return 0;
+    return channels * 64;
 }
 
-OSData *copyVbios(uint32_t deviceId) {
-    auto platform = IOService::getPlatform();
-    if (!platform || !platform->metaCast("IOACPIPlatformExpert")) return nullptr;
-    auto table = static_cast<AcpiPlatformAccess *>(platform)->getVfct();
-    if (!table || table->getLength() < 0x4c || table->getLength() > 512 * 1024) return nullptr;
-    auto bytes = static_cast<const uint8_t *>(table->getBytesNoCopy());
-    if (!bytes || memcmp(bytes, "VFCT", 4)) return nullptr;
-    uint32_t length = read32(bytes + 4);
-    if (length < 0x4c || length > table->getLength()) return nullptr;
+bool isValidTable(const uint8_t *image, uint32_t size, uint32_t offset) {
+    return !offset || (offset <= size - 4 && readUint16(image + offset) >= 4 &&
+        readUint16(image + offset) <= size - offset);
+}
+
+bool publishVbios(IOPCIDevice *device, OSData *data) {
+    auto image = static_cast<const uint8_t *>(data->getBytesNoCopy());
+    uint32_t size = data->getLength();
+    if (!image || size < 0x4a || size > 0xfe00 || size % 512 || image[0] != 0x55 || image[1] != 0xaa ||
+        image[2] * 512U != size) {
+        KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "validate", "Invalid ROM signature or length=%u", size);
+        return false;
+    }
+    uint32_t pci = readUint16(image + 0x18);
+    uint32_t header = readUint16(image + 0x48);
+    if (pci > size - 0x18 || header > size - 0x22 || memcmp(image + pci, "PCIR", 4) ||
+        readUint16(image + pci + 4) != 0x1002 || readUint16(image + pci + 0x10) * 512U != size ||
+        !(image[pci + 0x15] & 0x80) || memcmp(image + header + 4, "ATOM", 4) ||
+        readUint16(image + header) < 0x22 || readUint16(image + header) > size - header ||
+        image[header + 2] != 2 || (image[header + 3] != 2 && image[header + 3] != 3)) {
+        KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "validate", "Invalid PCIR or ATOM header");
+        return false;
+    }
+    uint32_t master = readUint16(image + header + 0x20);
+    if (master > size - 0x3e) {
+        KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "validate", "Master table offset out of bounds: 0x%x", master);
+        return false;
+    }
+    uint32_t masterSize = readUint16(image + master);
+    if (masterSize < 0x3e || masterSize > size - master || image[master + 2] != 2 || image[master + 3] != 1) {
+        KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "validate", "Invalid master table size or revision: size=%u", masterSize);
+        return false;
+    }
     uint8_t checksum = 0;
-    for (uint32_t i = 0; i < length; ++i) checksum += bytes[i];
-    if (checksum) return nullptr;
-    uint32_t offset = read32(bytes + 0x34);
-    if (offset < 0x4c || offset >= length) return nullptr;
-    while (offset < length) {
-        if (length - offset < 28) return nullptr;
-        auto vendor = read16(bytes + offset + 12);
-        auto device = read16(bytes + offset + 14);
-        auto size = read32(bytes + offset + 24);
-        offset += 28;
-        if (!size || size > length - offset) return nullptr;
-        if (vendor == 0x1002 && device == deviceId) {
-            if (!validAtomRom(bytes + offset, size)) return nullptr;
-            return OSData::withBytes(bytes + offset, size);
-        }
-        offset += size;
+    for (uint32_t i = 0; i < size; ++i) checksum += image[i];
+    if (checksum) {
+        KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "validate", "Invalid ROM checksum=0x%02x", static_cast<unsigned int>(checksum));
+        return false;
     }
-    return nullptr;
+    uint32_t pspOffset = readUint16(image + master + 0x16);
+    uint32_t vramOffset = readUint16(image + master + 0x3c);
+    if (!isValidTable(image, size, pspOffset) || !isValidTable(image, size, vramOffset)) {
+        KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "validate", "Invalid PSP or VRAM table: PSP=0x%x VRAM=0x%x", pspOffset, vramOffset);
+        return false;
+    }
+    bool addPsp = !pspOffset;
+    bool addVram = !vramOffset;
+    uint32_t width = 0;
+    uint32_t vramSize = 0;
+    if (!vramOffset) {
+        width = readMemoryWidth(image, size, master, masterSize);
+        vramSize = readVramSize(device);
+        if (!width || !vramSize) {
+            KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "prepare", "Memory parameters unavailable: size=%u MiB width=%u bits", vramSize, width);
+            return false;
+        }
+    }
+    uint32_t end = size;
+    if (!pspOffset) {
+        pspOffset = (end + 15) & ~15U;
+        end = pspOffset + 0x414;
+    }
+    if (!vramOffset) {
+        vramOffset = (end + 15) & ~15U;
+        end = vramOffset + 0x358;
+    }
+    uint32_t outputSize = (end + 511) & ~511U;
+    if (end > 0x10000 || outputSize > 0xfe00) {
+        KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "prepare", "Augmented ROM exceeds size limit: size=%u", outputSize);
+        return false;
+    }
+    auto output = static_cast<uint8_t *>(IOMalloc(outputSize));
+    if (!output) {
+        KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "prepare", "Unable to allocate %u-byte ROM buffer", outputSize);
+        return false;
+    }
+    bzero(output, outputSize);
+    memcpy(output, image, size);
+    writeUint16(output + pci + 6, 0x73ff);
+    if (addPsp) {
+        writeUint16(output + master + 0x16, static_cast<uint16_t>(pspOffset));
+        writeUint16(output + pspOffset, 0x414);
+        output[pspOffset + 2] = 2;
+        output[pspOffset + 3] = 1;
+        memcpy(output + pspOffset + 4, "$PSP", 4);
+    }
+    if (addVram) {
+        writeUint16(output + master + 0x3c, static_cast<uint16_t>(vramOffset));
+        writeUint16(output + vramOffset, 0x358);
+        output[vramOffset + 2] = 2;
+        output[vramOffset + 3] = 6;
+        output[vramOffset + 20] = 1;
+        auto module = output + vramOffset + 24;
+        uint32_t channels = width / 16;
+        writeUint32(module, vramSize);
+        writeUint32(module + 4, (1U << channels) - 1);
+        writeUint16(module + 20, 0x34);
+        module[23] = 0x70;
+        module[24] = static_cast<uint8_t>(channels);
+        module[25] = 4;
+        memcpy(module + 32, "RMB-UMA", 8);
+    }
+    output[2] = static_cast<uint8_t>(outputSize / 512);
+    writeUint16(output + pci + 0x10, static_cast<uint16_t>(outputSize / 512));
+    output[0x21] = 0;
+    checksum = 0;
+    for (uint32_t i = 0; i < outputSize; ++i) checksum += output[i];
+    output[0x21] = static_cast<uint8_t>(-checksum);
+    auto replacement = OSData::withBytes(output, outputSize);
+    IOFree(output, outputSize);
+    bool published = replacement && device->setProperty("ATY,bin_image", replacement);
+    if (replacement) replacement->release();
+    if (!published) {
+        KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "publish", "Unable to create or publish augmented ROM, size=%u", outputSize);
+        return false;
+    }
+    KernelLog::logInfo(KernelLog::Category::Hardware, "VBIOS", "publish", "PSP added=%u VRAM added=%u size=%u MiB width=%u bits published=%u",
+        static_cast<unsigned int>(addPsp), static_cast<unsigned int>(addVram),
+        vramSize, width, static_cast<unsigned int>(published));
+    return published;
 }
 
-#endif
 }
 
-#ifndef REMBRANDT_VBIOS_HOST_TEST
-bool publishRembrandtVbios(IORegistryEntry *device, uint32_t deviceId) {
-    if (!device || !isRembrandtDeviceId(deviceId)) return false;
-    auto rom = copyVbios(deviceId);
-    if (rom) {
-        auto bytes = static_cast<const uint8_t *>(rom->getBytesNoCopy());
-        auto pci = OSDynamicCast(IOPCIDevice, device);
-        AtomLayout layout {};
-        bool valid = parseAtomLayout(bytes, rom->getLength(), deviceId, layout);
-        uint32_t vramMiB = registryUint32(device, "rmb-vram-size-mb");
-        uint32_t width = registryUint32(device, "rmb-memory-width");
-        if (valid && !read16(bytes + layout.tables + 0x3c)) {
-            if (!vramMiB) vramMiB = readUmaSize(pci);
-            if (!width) width = readUmaWidth(bytes, rom->getLength(), layout);
-        }
-        constexpr uint32_t maxImageSize = 0x10000;
-        auto augmented = valid ? static_cast<uint8_t *>(IOMalloc(maxImageSize)) : nullptr;
-        if (augmented) {
-            auto result = augmentVbios(bytes, rom->getLength(), deviceId, vramMiB, width, augmented, maxImageSize);
-            if (result.size) {
-                auto replacement = OSData::withBytes(augmented, result.size);
-                if (replacement) {
-                    rom->release();
-                    rom = replacement;
-                    KernelLog::logInfo(KernelLog::Category::Hardware, "VBIOS", "augment", "PSP added=%u VRAM added=%u size=%u MiB width=%u bits",
-                                       static_cast<unsigned int>(result.pspAdded), static_cast<unsigned int>(result.vramAdded), vramMiB, width);
-                    if (result.vramMissing)
-                        KernelLog::logWarning(KernelLog::Category::Hardware, "VBIOS", "augment", "VRAM parameters unavailable; set rmb-vram-size-mb and rmb-memory-width");
-                }
-            } else KernelLog::logWarning(KernelLog::Category::Hardware, "VBIOS", "augment", "Image cannot be extended; using original VBIOS");
-            IOFree(augmented, maxImageSize);
-        } else if (!valid) KernelLog::logWarning(KernelLog::Category::Hardware, "VBIOS", "augment", "Unsupported ATOM layout; using original VBIOS");
-        else KernelLog::logWarning(KernelLog::Category::Hardware, "VBIOS", "augment", "Unable to allocate buffer; using original VBIOS");
-        bool published = device->setProperty("ATY,bin_image", rom);
-        KernelLog::logInfo(KernelLog::Category::Hardware, "VBIOS", "publish", "VFCT image size=%u published=%u", rom->getLength(), static_cast<unsigned int>(published));
-        rom->release();
-        return published;
-    } else {
-        KernelLog::logWarning(KernelLog::Category::Hardware, "VBIOS", "publish", "No valid VFCT image for device %04x", deviceId);
+bool prepareRembrandtVbios(IOPCIDevice *device) {
+    if (!device) {
+        KernelLog::logError(KernelLog::Category::Hardware, "VBIOS", "prepare", "GPU device unavailable");
+        return false;
     }
-    return false;
+    device->removeProperty("ATY,bin_image");
+    auto image = copyVfctVbios(device);
+    if (!image) return false;
+    bool published = publishVbios(device, image);
+    image->release();
+    return published;
 }
-#endif

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <stdint.h>
+class IOPCIDevice;
 
-class IORegistryEntry;
-bool publishRembrandtVbios(IORegistryEntry *device, uint32_t deviceId);
+bool prepareRembrandtVbios(IOPCIDevice *device);
