@@ -12,6 +12,7 @@ extern void quiesceIh(const char *reason);
 namespace {
 
 IONotifier *pciNotifier;
+IONotifier *acceleratorNotifier;
 IOPCIDevice *rembrandtDevice;
 uint32_t rembrandtDeviceId;
 IOLock *resourcesLock;
@@ -20,6 +21,15 @@ bool resourcesPrepared;
 uint32_t getRegistryUint32(IORegistryEntry *entry, const char *key) {
     auto data = OSDynamicCast(OSData, entry->getProperty(key));
     return data && data->getLength() >= sizeof(uint32_t) ? *static_cast<const uint32_t *>(data->getBytesNoCopy()) : 0;
+}
+
+bool handleAcceleratorMatched(void *, void *, IOService *service, IONotifier *) {
+    auto provider = service->getProvider();
+    IOLockLock(resourcesLock);
+    bool selected = provider == rembrandtDevice && isRembrandtDeviceId(rembrandtDeviceId);
+    IOLockUnlock(resourcesLock);
+    if (selected) publishRembrandtModel(provider);
+    return true;
 }
 
 bool handleGpuPublished(void *, void *, IOService *service, IONotifier *) {
@@ -89,5 +99,11 @@ bool startGpuInterruptCleanup() {
     matching->release();
     if (!pciNotifier) KernelLog::logError(KernelLog::Category::Hook, "GpuInterrupt", "register", "PCI publication notification failed");
     else KernelLog::logInfo(KernelLog::Category::Hook, "GpuInterrupt", "register", "PCI publication notification installed");
+    auto acceleratorMatching = IOService::serviceMatching("AMDRadeonX6000_AMDNavi23GraphicsAccelerator");
+    if (acceleratorMatching) {
+        acceleratorNotifier = IOService::addMatchingNotification(gIOMatchedNotification, acceleratorMatching, handleAcceleratorMatched, nullptr);
+        acceleratorMatching->release();
+    }
+    if (!acceleratorNotifier) KernelLog::logError(KernelLog::Category::Hardware, "PCI", "publish model", "Accelerator notification unavailable");
     return pciNotifier != nullptr;
 }

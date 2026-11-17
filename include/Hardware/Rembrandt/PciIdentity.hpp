@@ -9,3 +9,4 @@ constexpr bool isRembrandtDeviceId(uint32_t deviceId) {
 }
 
 bool publishRembrandtIdentity(IORegistryEntry *device, uint32_t deviceId);
+bool publishRembrandtModel(IORegistryEntry *device);
