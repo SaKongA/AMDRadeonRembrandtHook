@@ -147,11 +147,11 @@ bool isRembrandtHookEnabled() {
 }
 
 void startRembrandtHook() {
-    KernelLog::startDiskLogging();
     if (!isRembrandtHookEnabled()) {
         KernelLog::logInfo(KernelLog::Category::Core, "Core", "start", "Startup not authorized by NVRAM flags");
         return;
     }
+    KernelLog::startDiskLogging();
     if (!KernelLog::startNvramLogging()) KernelLog::logWarning(KernelLog::Category::Core, "KernelLog", "start", "Unable to start NVRAM logging");
     KernelLog::logInfo(KernelLog::Category::Core, "Core", "start", "Initializing Rembrandt hooks");
     bool gpuReady = startGpuInterruptCleanup();
