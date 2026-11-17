@@ -1,5 +1,5 @@
 NAME := AMDRadeonRembrandtHook
-VERSION := 0.1.1
+VERSION := 0.1.2
 BUILD_DIR ?= build
 SDK_DIR ?= upstream/MacKernelSDK
 LILU_DIR ?= upstream/Lilu/Lilu
