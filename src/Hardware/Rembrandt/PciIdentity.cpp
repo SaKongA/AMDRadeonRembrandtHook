@@ -43,6 +43,10 @@ const char *getRembrandtModelName() {
 
 }
 
+bool isRembrandt660M() {
+    return !strcmp(getRembrandtModelName(), "660M");
+}
+
 bool publishRembrandtIdentity(IORegistryEntry *device, uint32_t deviceId) {
     if (!device || !isRembrandtDeviceId(deviceId)) return false;
     const uint32_t spoofedDeviceId = 0x73ff;

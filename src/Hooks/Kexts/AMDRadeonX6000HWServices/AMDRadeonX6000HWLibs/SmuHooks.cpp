@@ -1,5 +1,6 @@
 #include "Kexts/AMDRadeonX6000HWServices/AMDRadeonX6000HWLibs/HWLibsHooks.hpp"
 #include "Hardware/Rembrandt/Smu13Mailbox.hpp"
+#include "Hardware/Rembrandt/PciIdentity.hpp"
 #include "Diagnostics/KernelLog.hpp"
 
 extern void applyGcGolden();
@@ -32,12 +33,16 @@ uint64_t wrapInitializeSmuSoftware(uint64_t input, uint64_t output, uint64_t, ui
         KernelLog::logError(KernelLog::Category::Hook, "SMU", "initialize software", "Invalid input or output structure");
         return 1;
     }
-    KernelLog::logInfo(KernelLog::Category::Hook, "SMU", "initialize software", "Preparing graphics engines");
     *reinterpret_cast<void **>(out + 0x8) = smuContext;
     uint32_t argument = 0;
     if (!sendSmuMessage(0x02, argument)) KernelLog::logWarning(KernelLog::Category::Hook, "SMU", "initialize software", "Message 0x02 timed out");
-    haltGraphicsEngines();
-    resetGraphicsEngines();
+    if (isRembrandt660M()) {
+        KernelLog::logInfo(KernelLog::Category::Hook, "SMU", "initialize software", "660M: skipping startup graphics halt and MODE2 reset");
+    } else {
+        KernelLog::logInfo(KernelLog::Category::Hook, "SMU", "initialize software", "Preparing graphics engines using the existing reset path");
+        haltGraphicsEngines();
+        resetGraphicsEngines();
+    }
     return 0;
 }
 
