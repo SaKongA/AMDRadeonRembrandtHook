@@ -27,17 +27,23 @@ uint64_t wrapInitializePspAsicType(uint64_t psp, uint64_t info, uint64_t c, uint
         replacement[4] = 11;
         info = reinterpret_cast<uint64_t>(copy);
     }
-    return reinterpret_cast<HookFunction>(originalInitializePspAsicType)(psp, info, c, d, e, f);
+    KernelLog::logInfo(KernelLog::Category::Hook, "PSP", "asic", "original MP0=%u.%u.%u mapped=%u.%u.%u", version[2], version[3], version[4], reinterpret_cast<uint32_t *>(info)[2], reinterpret_cast<uint32_t *>(info)[3], reinterpret_cast<uint32_t *>(info)[4]);
+    auto result = reinterpret_cast<HookFunction>(originalInitializePspAsicType)(psp, info, c, d, e, f);
+    KernelLog::logInfo(KernelLog::Category::Hook, "PSP", "asic", "result=0x%llx", result);
+    return result;
 }
 
 uint64_t wrapCreatePspRing(uint64_t psp, uint64_t type, uint64_t c, uint64_t d, uint64_t e, uint64_t f) {
+    constexpr uint32_t mailbox = 0x16000 + 0x80;
+    KernelLog::logInfo(KernelLog::Category::Hook, "PSP", "ring create", "type=%llu mailbox before=0x%x", type, mmioRead(mailbox));
     if (type == 2) {
-        constexpr uint32_t mailbox = 0x16000 + 0x80;
         mmioWrite(mailbox, 0x00030000);
         IODelay(20000);
         for (uint32_t i = 0; i < 2000 && !(mmioRead(mailbox) & 0x80000000); ++i) IODelay(1000);
     }
-    return reinterpret_cast<HookFunction>(originalCreatePspRing)(psp, type, c, d, e, f);
+    auto result = reinterpret_cast<HookFunction>(originalCreatePspRing)(psp, type, c, d, e, f);
+    KernelLog::logInfo(KernelLog::Category::Hook, "PSP", "ring create", "type=%llu result=0x%llx mailbox after=0x%x", type, result, mmioRead(mailbox));
+    return result;
 }
 
 uint64_t wrapInitializeVbios(uint64_t object, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f) {

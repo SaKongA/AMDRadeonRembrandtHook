@@ -96,6 +96,7 @@ uint64_t wrapInitializePspTmr(uint64_t psp, uint64_t b, uint64_t c, uint64_t d, 
     *reinterpret_cast<const uint8_t **>(object + 0x3588) = fw_yc_toc;
     *reinterpret_cast<uint32_t *>(object + 0x3580) = static_cast<uint32_t>(fw_yc_toc_end - fw_yc_toc);
     uint64_t result = reinterpret_cast<HookFunction>(originalInitializePspTmr)(psp, b, c, d, e, f);
+    KernelLog::logInfo(KernelLog::Category::Hook, "PSP", "TMR", "initial result=0x%x toc bytes=%u TMR bytes=0x%llx", static_cast<uint32_t>(result), *reinterpret_cast<uint32_t *>(object + 0x3580), *reinterpret_cast<uint64_t *>(object + 0xaf8));
     if (static_cast<uint32_t>(result) && unloadPspTmr) {
         KernelLog::logWarning(KernelLog::Category::Hook, "Firmware", "initialize PSP", "TMR initialization failed: status=0x%x; retrying", static_cast<uint32_t>(result));
         reinterpret_cast<uint64_t (*)(uint64_t)>(unloadPspTmr)(psp);
@@ -119,6 +120,7 @@ uint64_t wrapCheckFirmwareCapability(uint64_t psp, uint64_t type, uint64_t c, ui
     uint32_t firmwareType = static_cast<uint32_t>(type);
     uint64_t result = firmwareType == 30 || firmwareType == 31 || firmwareType == 32 ? 0 :
         reinterpret_cast<HookFunction>(originalCheckFirmwareCapability)(psp, type, c, d, e, f) & 0xff;
+    KernelLog::logDiagnosticInfo(KernelLog::Category::Hook, "PSP", "firmware capability", "type=%u load=%u", firmwareType, static_cast<unsigned int>(result));
     if (result && firmwareType == 35) dmubResetForLoad();
     return result;
 }

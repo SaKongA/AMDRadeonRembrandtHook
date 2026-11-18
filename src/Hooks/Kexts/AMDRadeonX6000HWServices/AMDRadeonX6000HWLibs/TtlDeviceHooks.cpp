@@ -48,7 +48,9 @@ uint32_t wrapInitializeTtlRaw(void *parameters, void *context) {
 
 uint64_t wrapSetDeviceCapability(uint64_t context, uint64_t device, uint64_t revision,
                                  uint64_t externalRevision, uint64_t e, uint64_t f) {
-    return reinterpret_cast<HookFunction>(originalSetDeviceCapability)(context, device, 0, externalRevision, e, f);
+    auto result = reinterpret_cast<HookFunction>(originalSetDeviceCapability)(context, device, 0, externalRevision, e, f);
+    KernelLog::logDiagnosticInfo(KernelLog::Category::Hook, "TTL", "device capability", "Device=0x%llx internal=0x%llx external=0x%llx mapped internal=0 result=0x%llx", device, revision, externalRevision, result);
+    return result;
 }
 
 uint64_t wrapGetUmaPhysicalFramebufferOffset(uint64_t vm, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f) {
