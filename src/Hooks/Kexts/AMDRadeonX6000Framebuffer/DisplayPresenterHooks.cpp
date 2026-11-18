@@ -1,15 +1,21 @@
 #include "Kexts/AMDRadeonX6000Framebuffer/FramebufferHooks.hpp"
 #include "Diagnostics/KernelLog.hpp"
+#include <Headers/kern_util.hpp>
 #include <IOKit/IOLib.h>
+#include <IOKit/IOInterruptEventSource.h>
 #include <libkern/c++/OSObject.h>
 #include <kern/thread.h>
+#include <mach/mach_time.h>
 
 namespace {
 
 constexpr uint32_t presenterCount = 6;
+constexpr uint32_t timingCaptureSeconds = 900;
 mach_vm_address_t originalVblank;
 mach_vm_address_t originalVupdate;
 mach_vm_address_t originalEnqueue;
+mach_vm_address_t originalProcessFlip;
+mach_vm_address_t originalDeferredComplete;
 mach_vm_address_t originalEnable;
 mach_vm_address_t setPipeInterruptState;
 const OSMetaClass *presenterMetaClass;
@@ -19,22 +25,38 @@ struct PresenterState {
     uint32_t vupdateCount;
     uint32_t enqueueCount;
 };
+struct EventTiming {
+    uint64_t lastEvent;
+    uint64_t maxGap;
+    uint32_t count;
+};
+struct PresenterTiming {
+    EventTiming vblank;
+    EventTiming vupdate;
+    EventTiming enqueue;
+    EventTiming flip;
+    EventTiming deferredComplete;
+};
 PresenterState presenters[presenterCount];
+PresenterTiming presenterTimings[presenterCount];
 bool presenterEnabled[presenterCount];
 IOSimpleLock *presenterLock;
 bool presenterTracking;
+bool presenterTimingEnabled;
+bool flipTimingInstalled;
+bool deferredCompleteTimingInstalled;
 
 uint64_t readPresenterField(uint64_t presenter, uint32_t offset) {
     return *reinterpret_cast<volatile uint64_t *>(presenter + offset);
 }
 
-int32_t recordPresenter(uint64_t presenter) {
+int32_t recordPresenter(uint64_t presenter, EventTiming PresenterTiming::*event, bool timingOnly = false) {
     if (!presenter || !presenterMetaClass || reinterpret_cast<OSObject *>(presenter)->getMetaClass() != presenterMetaClass) return -1;
     uint8_t index = *reinterpret_cast<volatile uint8_t *>(presenter + 0xa0);
     if (index >= presenterCount) return -1;
     OSObject *previous = nullptr;
     auto interruptState = IOSimpleLockLockDisableInterrupt(presenterLock);
-    if (!presenterTracking) {
+    if (!presenterTracking || (timingOnly && (!presenterTimingEnabled || presenters[index].presenter != presenter))) {
         IOSimpleLockUnlockEnableInterrupt(presenterLock, interruptState);
         return -1;
     }
@@ -42,7 +64,18 @@ int32_t recordPresenter(uint64_t presenter) {
         reinterpret_cast<OSObject *>(presenter)->retain();
         previous = reinterpret_cast<OSObject *>(presenters[index].presenter);
         presenters[index] = {presenter, 0, 0, 0};
+        presenterTimings[index] = {};
         presenterEnabled[index] = false;
+    }
+    if (presenterTimingEnabled) {
+        auto &timing = presenterTimings[index].*event;
+        auto now = mach_absolute_time();
+        if (timing.lastEvent) {
+            auto gap = now - timing.lastEvent;
+            if (gap > timing.maxGap) timing.maxGap = gap;
+        }
+        timing.lastEvent = now;
+        ++timing.count;
     }
     IOSimpleLockUnlockEnableInterrupt(presenterLock, interruptState);
     if (previous) previous->release();
@@ -57,32 +90,105 @@ void incrementPresenterCount(int32_t index, uint64_t presenter, uint32_t Present
 }
 
 void wrapVblank(uint64_t owner, uint64_t argument) {
-    auto index = recordPresenter(owner);
+    auto index = recordPresenter(owner, &PresenterTiming::vblank);
     reinterpret_cast<void (*)(uint64_t, uint64_t)>(originalVblank)(owner, argument);
     incrementPresenterCount(index, owner, &PresenterState::vblankCount);
 }
 
 void wrapVupdate(uint64_t owner, uint64_t argument) {
-    auto index = recordPresenter(owner);
+    auto index = recordPresenter(owner, &PresenterTiming::vupdate);
     reinterpret_cast<void (*)(uint64_t, uint64_t)>(originalVupdate)(owner, argument);
     incrementPresenterCount(index, owner, &PresenterState::vupdateCount);
 }
 
 uint64_t wrapEnqueue(uint64_t presenter, uint64_t mask) {
-    auto index = recordPresenter(presenter);
+    auto index = recordPresenter(presenter, &PresenterTiming::enqueue);
     uint64_t result = reinterpret_cast<uint64_t (*)(uint64_t, uint64_t)>(originalEnqueue)(presenter, mask);
     incrementPresenterCount(index, presenter, &PresenterState::enqueueCount);
     return result;
+}
+
+IOReturn wrapProcessFlip(uint64_t presenter, uint32_t flags) {
+    recordPresenter(presenter, &PresenterTiming::flip, true);
+    return reinterpret_cast<IOReturn (*)(uint64_t, uint32_t)>(originalProcessFlip)(presenter, flags);
+}
+
+void wrapDeferredComplete(OSObject *owner, IOInterruptEventSource *sender, int count) {
+    recordPresenter(reinterpret_cast<uint64_t>(owner), &PresenterTiming::deferredComplete, true);
+    reinterpret_cast<IOInterruptEventSource::Action>(originalDeferredComplete)(owner, sender, count);
 }
 
 uint32_t wrapEnable(uint64_t presenter) {
     return reinterpret_cast<uint32_t (*)(uint64_t)>(originalEnable)(presenter);
 }
 
+unsigned long long ticksToMicroseconds(uint64_t ticks) {
+    uint64_t nanoseconds;
+    absolutetime_to_nanoseconds(ticks, &nanoseconds);
+    return static_cast<unsigned long long>(nanoseconds / 1000);
+}
+
+unsigned long long eventAgeMicroseconds(const EventTiming &timing, uint64_t now) {
+    return timing.lastEvent ? ticksToMicroseconds(now - timing.lastEvent) : 0;
+}
+
+EventTiming takeEventTiming(EventTiming &timing) {
+    EventTiming snapshot = timing;
+    timing.maxGap = 0;
+    timing.count = 0;
+    return snapshot;
+}
+
+void reportPresenterTiming(void *, wait_result_t) {
+    KernelLog::logDiagnosticInfo(KernelLog::Category::Hook, "PresenterTiming", "start",
+        "Up to %u samples, fields=count/max_gap_us/age_us flip_hook=%u deferred_hook=%u",
+        timingCaptureSeconds, static_cast<uint32_t>(flipTimingInstalled), static_cast<uint32_t>(deferredCompleteTimingInstalled));
+    bool wasActive[presenterCount] {};
+    auto previous = mach_absolute_time();
+    for (uint32_t sample = 0; sample < timingCaptureSeconds; ++sample) {
+        IOSleep(1000);
+        PresenterTiming snapshots[presenterCount] {};
+        auto interruptState = IOSimpleLockLockDisableInterrupt(presenterLock);
+        auto now = mach_absolute_time();
+        bool running = presenterTracking;
+        for (uint32_t i = 0; i < presenterCount; ++i) {
+            auto &timing = presenterTimings[i];
+            snapshots[i] = {takeEventTiming(timing.vblank), takeEventTiming(timing.vupdate), takeEventTiming(timing.enqueue),
+                            takeEventTiming(timing.flip), takeEventTiming(timing.deferredComplete)};
+        }
+        IOSimpleLockUnlockEnableInterrupt(presenterLock, interruptState);
+        if (!running) break;
+        for (uint32_t i = 0; i < presenterCount; ++i) {
+            const auto &timing = snapshots[i];
+            bool active = timing.vblank.count || timing.vupdate.count || timing.enqueue.count ||
+                timing.flip.count || timing.deferredComplete.count;
+            if (active || wasActive[i]) {
+                KernelLog::logDiagnosticInfo(KernelLog::Category::Hook, "PresenterTiming", "sample",
+                    "pipe=%u uptime_us=%llu window_us=%llu vblank=%u/%llu/%llu vupdate=%u/%llu/%llu "
+                    "enqueue=%u/%llu/%llu flip=%u/%llu/%llu deferred=%u/%llu/%llu",
+                    i, ticksToMicroseconds(now), ticksToMicroseconds(now - previous),
+                    timing.vblank.count, ticksToMicroseconds(timing.vblank.maxGap), eventAgeMicroseconds(timing.vblank, now),
+                    timing.vupdate.count, ticksToMicroseconds(timing.vupdate.maxGap), eventAgeMicroseconds(timing.vupdate, now),
+                    timing.enqueue.count, ticksToMicroseconds(timing.enqueue.maxGap), eventAgeMicroseconds(timing.enqueue, now),
+                    timing.flip.count, ticksToMicroseconds(timing.flip.maxGap), eventAgeMicroseconds(timing.flip, now),
+                    timing.deferredComplete.count, ticksToMicroseconds(timing.deferredComplete.maxGap),
+                    eventAgeMicroseconds(timing.deferredComplete, now));
+            }
+            wasActive[i] = active;
+        }
+        previous = now;
+    }
+    auto interruptState = IOSimpleLockLockDisableInterrupt(presenterLock);
+    presenterTimingEnabled = false;
+    IOSimpleLockUnlockEnableInterrupt(presenterLock, interruptState);
+    KernelLog::logDiagnosticInfo(KernelLog::Category::Hook, "PresenterTiming", "stop", "Capture ended");
+}
+
 void stopPresenterTracking() {
     OSObject *objects[presenterCount] {};
     auto interruptState = IOSimpleLockLockDisableInterrupt(presenterLock);
     presenterTracking = false;
+    presenterTimingEnabled = false;
     for (uint32_t i = 0; i < presenterCount; ++i) {
         objects[i] = reinterpret_cast<OSObject *>(presenters[i].presenter);
         presenters[i].presenter = 0;
@@ -150,6 +256,28 @@ void watchPresenters(void *, wait_result_t) {
     stopPresenterTracking();
 }
 
+void startPresenterTiming(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
+    KernelPatcher::RouteRequest flipRequest {
+        "__ZN29AMDRadeonX6000_AmdFbPresenter22processFlipTransactionEj", wrapProcessFlip, originalProcessFlip};
+    flipTimingInstalled = patcher.routeMultiple(index, &flipRequest, 1, address, size);
+    patcher.clearError();
+    KernelPatcher::RouteRequest completeRequest {
+        "__ZN29AMDRadeonX6000_AmdFbPresenter27deferredTransactionCompleteEP8OSObjectP22IOInterruptEventSourcei",
+        wrapDeferredComplete, originalDeferredComplete};
+    deferredCompleteTimingInstalled = patcher.routeMultiple(index, &completeRequest, 1, address, size);
+    patcher.clearError();
+
+    thread_t thread;
+    if (kernel_thread_start(reportPresenterTiming, nullptr, &thread) == KERN_SUCCESS) {
+        thread_deallocate(thread);
+        return;
+    }
+    auto interruptState = IOSimpleLockLockDisableInterrupt(presenterLock);
+    presenterTimingEnabled = false;
+    IOSimpleLockUnlockEnableInterrupt(presenterLock, interruptState);
+    KernelLog::logDiagnosticWarning(KernelLog::Category::Hook, "PresenterTiming", "start", "Unable to start timing report");
+}
+
 }
 
 void installDisplayPresenterHooks(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
@@ -158,6 +286,7 @@ void installDisplayPresenterHooks(KernelPatcher &patcher, size_t index, mach_vm_
         KernelLog::logError(KernelLog::Category::Hook, "Presenter", "initialize", "Unable to allocate tracking lock");
         return;
     }
+    bool captureTiming = checkKernelArgument("-rmbpresenttiming");
     auto interruptState = IOSimpleLockLockDisableInterrupt(presenterLock);
     presenterTracking = true;
     IOSimpleLockUnlockEnableInterrupt(presenterLock, interruptState);
@@ -165,6 +294,9 @@ void installDisplayPresenterHooks(KernelPatcher &patcher, size_t index, mach_vm_
         patcher.solveSymbol(index, "__ZN29AMDRadeonX6000_AmdFbPresenter10gMetaClassE", address, size));
     if (!presenterMetaClass) KernelLog::logWarning(KernelLog::Category::Hook, "Presenter", "resolve", "Presenter metaclass unavailable: error=%d", static_cast<int>(patcher.getError()));
     patcher.clearError();
+    interruptState = IOSimpleLockLockDisableInterrupt(presenterLock);
+    presenterTimingEnabled = captureTiming && presenterMetaClass;
+    IOSimpleLockUnlockEnableInterrupt(presenterLock, interruptState);
     setPipeInterruptState = patcher.solveSymbol(index,
         "__ZN35AMDRadeonX6000_AmdRadeonFramebuffer21setPipeInterruptStateEb", address, size);
     if (!setPipeInterruptState) KernelLog::logWarning(KernelLog::Category::Hook, "Presenter", "resolve", "Pipe interrupt function unavailable: error=%d", static_cast<int>(patcher.getError()));
@@ -178,8 +310,10 @@ void installDisplayPresenterHooks(KernelPatcher &patcher, size_t index, mach_vm_
     if (patcher.routeMultiple(index, requests, address, size)) {
         KernelLog::logInfo(KernelLog::Category::Hook, "Presenter", "install", "Presenter hooks installed");
         thread_t thread;
-        if (kernel_thread_start(watchPresenters, nullptr, &thread) == KERN_SUCCESS) thread_deallocate(thread);
-        else {
+        if (kernel_thread_start(watchPresenters, nullptr, &thread) == KERN_SUCCESS) {
+            thread_deallocate(thread);
+            if (captureTiming && presenterMetaClass) startPresenterTiming(patcher, index, address, size);
+        } else {
             KernelLog::logError(KernelLog::Category::Hook, "Presenter", "start", "Unable to start presenter watch");
             stopPresenterTracking();
         }
